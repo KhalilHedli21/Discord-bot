@@ -11,3 +11,12 @@ client = commands.Bot(command_prefix='!', intents=intents)
 @client.event
 async def on_ready():
     print(f'We have logged in as {client.user}')
+
+#testing to see if bot is responding to simple commands
+@client.command()
+async def hello(ctx):
+    await ctx.send('Hello!')
+
+@client.command()
+async def ping(ctx):
+    await ctx.send('pong!')
