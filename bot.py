@@ -1,73 +1,274 @@
+from discord.ext import commands, tasks
 import discord
-from discord.ext import commands
-import asyncio 
-from datetime import datetime
+from datetime import datetime, timedelta
+import sqlite3
+import csv
+import io
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+
 
 intents = discord.Intents.default()
 intents.message_content = True
 client = commands.Bot(command_prefix='!', intents=intents)
 
-#testing to see if bot is logged
-@client.event
-async def on_ready():
-    print(f'We have logged in as {client.user}')
+#setting up the db
+connection = sqlite3.connect('DBNAME') #enter your database name here (to test)
+cursor = connection.cursor()
+#create schedule table to save meetings and their info
+cursor.execute('''CREATE TABLE IF NOT EXISTS schedule (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    date TEXT NOT NULL,
+    time TEXT NOT NULL,
+    role TEXT,
+    reminder_sent BOOLEAN DEFAULT FALSE
+)''')
 
-#testing to see if bot is responding to simple commands
-@client.command()
-async def hello(ctx):
-    await ctx.send('Hello!')
+#function to add a schedule to the database
+def add_schedule_to_db(title, date, time, role):
+    cursor.execute('''INSERT INTO schedule (title, date, time, role) VALUES (?, ?, ?, ?)''',
+                   (title, date, time, role))
+    connection.commit()
 
-@client.command()
-async def ping(ctx):
-    await ctx.send('pong!')
+#function to retrieve the role from the server so we can mention directly
+def get_role_by_name(guild, role_name):
+    return discord.utils.get(guild.roles, name=role_name)
 
-#schedule a meeting with title, date, time and role(optional)
+
+#schedule command to set up meetings
 @client.command()
 async def schedule(ctx, title: str, date: str, time: str, role: discord.Role = None):
-    
+    """schedules a new meeting with a title, date, time, and optional role mention!\n syntax: !schedule "title" "yyyy-mm-dd" "H:M" "role"/@role """
     try:
-        try:
-            #converting the combined datetime string into a datetime object for easy manipulation
-            date_time_str = f"{date} {time}"
-            
-            meeting_time = datetime.strptime(date_time_str, "%Y-%m-%d %H:%M")
+        #combine date and time into a datetime object for easy manipulation
+        date_time_str = f"{date} {time}"
+        meeting_time = datetime.strptime(date_time_str, "%Y-%m-%d %H:%M")
 
-        except ValueError:
-            await ctx.send("Error: The date and time format is incorrect. Please use the format 'YYYY-MM-DD' 'HH:MM'.")
-            return
-        
         #check if the date is in the future
         if meeting_time < datetime.now():
             await ctx.send("Invalid: The scheduled time must be in the future.")
             return
-        
-        #calculate the time left until the meeting
-        time_till_meeting = meeting_time - datetime.now()
 
-         #calculate the time for the reminder 10 minutes before the meeting
-        reminder_time_10 = meeting_time - time_till_meeting(minutes=10)
-        
-        #calculate the time left until the reminder
-        reminder_time = reminder_time_10 - datetime.now()
+        #save the schedule to the database
+        add_schedule_to_db(title, date, time, role.name if role else None)
 
-        #send confirmation message in the channel where the command was used
-        await ctx.send(f"Meeting '{title}' is scheduled for {date} at {time}. I will remind you!")
-
-        if reminder_time.total_seconds() > 0:
-            await asyncio.sleep(reminder_time.total_seconds())
-            if role:
-                await ctx.send(f"Reminder: {title} is starting in 10 minutes! {role.mention}")
-            else:
-                await ctx.send(f"Reminder: {title} is starting in 10 minutes!")
-        
-        #wait for the specified time and then send a reminder
-        await asyncio.sleep(time_till_meeting.total_seconds())
-
-        #check if there is a role in the command to send a mention or not
-        if role:
-            await ctx.send(f"Reminder: {title} is starting now! {role.mention}")
-        else:
-            await ctx.send(f"Reminder: {title} is starting now!")
-
+        #send confirmation message 
+        await ctx.send(f" '{title}' is scheduled for {date} at {time}. I will remind you!")
     except Exception as e:
         await ctx.send(f"An error occurred: {str(e)}")
+
+
+
+#command to list all schedules and their info in a table
+@client.command()
+async def list(ctx):
+    """displays your schedule details in a table format!\n syntax: !list """
+    #retrieve schedules from the db
+    cursor.execute("SELECT * FROM schedule")
+    schedules = cursor.fetchall()
+
+    #check if there are any schedules in the db
+    if not schedules:
+        await ctx.send("No scheduled meetings found.")
+        return
+
+    
+    #draw the header part of tab
+    table =  "┌────────┬────────────┬────────────┬───────┬────────────┐\n"
+    table += "│   ID   │   Title    │    Date    │ Time  │    Role    │\n"
+    table += "├────────┼────────────┼────────────┼───────┼────────────┤\n"
+    
+    #add rows
+    for schedule in schedules:
+        table += "│ {0:<6} │ {1:<10} │ {2:<8} │ {3:<5} │ {4:<10} │\n".format(schedule[0], schedule[1], schedule[2], schedule[3], schedule[4] or "None")
+    
+    #add bottom border
+    table += "└────────┴────────────┴────────────┴───────┴────────────┘"
+
+
+    await ctx.send("Here are your upcoming meetings:")
+    #discord has a 2000 car limit so if it exceeds we split it 
+    max_message_length = 2000
+    while len(table) > max_message_length:
+        await ctx.send(f"```{table[:max_message_length]}```")
+        table = table[max_message_length:]
+
+    #send the rest of the table if it exceeds the limit
+
+    await ctx.send(f"```{table}```")
+
+
+#command to export the schedules as csv or pdf files
+@client.command()
+async def export(ctx, format: str):
+    """can turn your schedule into a csv or pdf !\n syntax: !export format_name"""
+    #validate the format parameter
+    if format not in ["csv", "pdf"]:
+        await ctx.send("Invalid format! Please use 'csv' or 'pdf'.")
+        return
+    
+    #fetch the schedule data from the database
+    cursor.execute("SELECT * FROM schedule")
+    schedules = cursor.fetchall()
+
+    #if format=csv
+    if format == "csv":
+        #create a file-like object to write CSV data
+        csv_file = io.StringIO()
+        csv_writer = csv.writer(csv_file)
+
+        #write headers 
+        csv_writer.writerow(["Meeting_ID", "Title", "Date", "Time", "Role"])
+
+        #write the data
+        for schedule in schedules:
+            
+            meeting_id, title, date, time, role, _ = schedule[:6]  #no need for the 6th column
+            csv_writer.writerow([meeting_id, title, date, time, role or "None"])
+
+        #go back to the start of the file
+        csv_file.seek(0)
+
+        #send the file
+        await ctx.send("Here is the CSV of upcoming meetings:", file=discord.File(fp=csv_file, filename="upcoming_meetings.csv"))
+    
+    #if format=pdf
+    elif format == "pdf":
+        #create a file-like object to write PDF data
+        pdf_file = io.BytesIO()
+        c = canvas.Canvas(pdf_file, pagesize=letter)
+
+        #add title and font
+        c.setFont("Helvetica", 12)
+        c.drawString(100, 750, "Upcoming Meetings:\n")
+
+        #define table headers and starting position
+        headers = ["Meeting_ID", "Title", "Date", "Time", "Role"]
+        y_position = 730
+        x_positions = [100, 200, 300, 400, 500]
+
+        #draw table headers
+        for i, header in enumerate(headers):
+            c.drawString(x_positions[i], y_position, header)
+
+        #draw table separators (lines)
+        c.setLineWidth(1)
+        c.line(90, y_position - 5, 600, y_position - 5)  #add lines for table 
+        y_position -= 20  #advance down
+
+        # Draw the table data
+        for schedule in schedules:
+            meeting_id, title, date, time, role, _ = schedule[:6]  #no need for 6th column
+
+            #draw each cell 
+            c.drawString(x_positions[0], y_position, str(meeting_id))
+            c.drawString(x_positions[1], y_position, str(title))
+            c.drawString(x_positions[2], y_position, str(date))
+            c.drawString(x_positions[3], y_position, str(time))
+            c.drawString(x_positions[4], y_position, str(role or "None"))
+
+            #draw line for table
+            c.line(90, y_position - 5, 600, y_position - 5)
+
+            y_position -= 20  #advance down
+
+        #save PDF
+        c.save()
+
+        #rewind to beginning
+        pdf_file.seek(0)
+        #send the PDF file
+        await ctx.send("Here is the PDF of the upcoming meetings:", file=discord.File(fp=pdf_file, filename="schedule.pdf"))
+
+
+
+#custom help command
+@client.command()
+async def helpme(ctx, command_name: str = None):
+    """shows help information for commands. without a command name, lists all available commands.
+    syntax: !helpme [command_name]"""
+    #if no command name is provided, show all commands
+    if command_name is None:
+        help_text = "Here are the available commands:\n"
+        for command in client.commands:
+            #for each command, include its name and description
+            help_text += f"**!{command.name}**: {command.help}\n"
+        await ctx.send(help_text)
+    else:
+        #show help for a specific command
+        command = client.get_command(command_name)
+        if command:
+            #send specific command's help text
+            await ctx.send(f"**!{command.name}**: {command.help}")
+        else:
+            #if the command doesn't exist
+            await ctx.send(f"No command found with the name `{command_name}`.")
+
+
+#task to check and send scheduled reminders each time when bot is turned on
+@tasks.loop(seconds=10)  
+async def check_scheduled_reminders():
+    cursor.execute("SELECT * FROM schedule WHERE reminder_sent = FALSE")
+    schedules = cursor.fetchall()
+
+    for schedule in schedules:
+        title, date, time, role, reminder_sent = schedule[1], schedule[2], schedule[3], schedule[4], schedule[5]
+        date_time_str = f"{date} {time}"
+        meeting_time = datetime.strptime(date_time_str, "%Y-%m-%d %H:%M")
+
+        if datetime.now() <= meeting_time:
+            #calculate the reminder time 10 minutes before the meeting
+            reminder_time_10 = meeting_time - timedelta(minutes=10)
+
+            #check if the reminder time is in the past but less than 10 minutes ago
+            if datetime.now() >= reminder_time_10 and (datetime.now() - reminder_time_10).total_seconds() < 60:
+                guild = client.guilds[0]  # Get the first (and only) guild
+                channel = discord.utils.get(guild.text_channels, name="🖥-cmd")
+                if channel:
+                        if role:
+                     #get the role from the server to easily mention
+                            role_obj = get_role_by_name(guild, role)
+    
+                            if role_obj:
+                                await channel.send(f"Reminder: {title} is starting in 10 minutes! {role_obj.mention}")
+                            else:
+                                await channel.send(f"Reminder: {title} is starting in 10 minutes!")
+                        else:
+                            await channel.send(f"Reminder: {title} is starting in 10 minutes!")
+                #update the database to mark this reminder as sent so that it won't check for it again
+                cursor.execute("UPDATE schedule SET reminder_sent = TRUE WHERE id = ?", (schedule[0],))
+                connection.commit()
+
+            #check if the meeting time is now
+            if datetime.now() >= meeting_time and (datetime.now() - meeting_time).total_seconds() < 60:
+                if channel:
+                    if role:
+                    #get the role from the server to easily mention
+                        role_obj = get_role_by_name(guild, role)
+    
+                        if role_obj:
+                            await channel.send(f"Reminder: {title} is starting in 10 minutes! {role_obj.mention}")
+                        else:
+                            await channel.send(f"Reminder: {title} is starting in 10 minutes!")
+                    else:
+                        await channel.send(f"Reminder: {title} is starting in 10 minutes!")
+
+                #mark the reminder as sent for "starting now"
+                cursor.execute("UPDATE schedule SET reminder_sent = TRUE WHERE id = ?", (schedule[0],))
+                connection.commit()
+
+
+#start the loop when the bot is ready
+@client.event
+async def on_ready():
+    print(f'{client.user} has connected to Discord!')
+    check_scheduled_reminders.start()  #this starts the task loop
+    await check_scheduled_reminders()
+
+
+
+
+#run the bot with your token
+client.run('TOKEN')
+
