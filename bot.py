@@ -6,6 +6,7 @@ import csv
 import io
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
+import re
 
 
 intents = discord.Intents.default()
@@ -34,30 +35,75 @@ def add_schedule_to_db(title, date, time, role):
 #function to retrieve the role from the server so we can mention directly
 def get_role_by_name(guild, role_name):
     return discord.utils.get(guild.roles, name=role_name)
+#delete a schedule from the database
+def delete_schedule(meeting_id):
+    cursor.execute("DELETE FROM schedule WHERE id = ?", (meeting_id,))
+    connection.commit()
 
+#command to delete a schedule
+@client.command()
+async def delete(ctx, meeting_id: int):
+    """deletes a schedule with the given meeting ID.\n syntax: !delete meeting_id"""
+    
+    cursor.execute("SELECT * FROM schedule WHERE id = ?", (meeting_id,))
+    schedule = cursor.fetchone()
+    if not schedule:
+        await ctx.send("No meeting found with that ID.")
+        return
+
+    delete_schedule(meeting_id)
+    await ctx.send(f"Meeting with ID {meeting_id} has been deleted.")
 
 #schedule command to set up meetings
 @client.command()
-async def schedule(ctx, title: str, date: str, time: str, role: discord.Role = None):
-    """schedules a new meeting with a title, date, time, and optional role mention!\n syntax: !schedule "title" "yyyy-mm-dd" "H:M" "role"/@role """
+async def schedule(ctx, title: str, *args):
+    """Schedules a new meeting with a title, absolute date/time, or relative time and a role (optional).\n
+    Syntax 1: !schedule "title" "yyyy-mm-dd" "H:M" @role\n
+    Syntax 2: !schedule "title" in X minutes/hours/days/weeks @role"""
     try:
-        #combine date and time into a datetime object for easy manipulation
-        date_time_str = f"{date} {time}"
-        meeting_time = datetime.strptime(date_time_str, "%Y-%m-%d %H:%M")
+        #retrieve the role if it is mentioned
+        role = None
+        if args and args[-1].startswith("<@&"):  #check if last argument is a role mention
+            role = discord.utils.get(ctx.guild.roles, id=int(args[-1][3:-1]))  #get role id
+            time_input = args[:-1]  #delete role from args
+        else:
+            time_input = args  #no role
 
-        #check if the date is in the future
+        time_str = " ".join(time_input)
+
+        #check if format is absolute or relative
+        try:
+            meeting_time = datetime.strptime(time_str, "%Y-%m-%d %H:%M")
+        except ValueError:
+            match = re.match(r"in (\d+) (minute|hour|day|week)s?", time_str)
+            if match:
+                value, unit = int(match.group(1)), match.group(2)
+                if unit == "minute":
+                    meeting_time = datetime.now() + timedelta(minutes=value)
+                elif unit == "hour":
+                    meeting_time = datetime.now() + timedelta(hours=value)
+                elif unit == "day":
+                    meeting_time = datetime.now() + timedelta(days=value)
+                elif unit == "week":
+                    meeting_time = datetime.now() + timedelta(weeks=value)
+                else:
+                    raise ValueError("Unsupported time unit.")
+            else:
+                raise ValueError("Invalid time format. Use 'YYYY-MM-DD H:M' or 'in X hours/days'.")
+
+        #ensure the meeting is scheduled in the future
         if meeting_time < datetime.now():
             await ctx.send("Invalid: The scheduled time must be in the future.")
             return
 
-        #save the schedule to the database
-        add_schedule_to_db(title, date, time, role.name if role else None)
+        #save the meeting to the database
+        add_schedule_to_db(title, meeting_time.strftime("%Y-%m-%d"), meeting_time.strftime("%H:%M"), role.name if role else None)
 
-        #send confirmation message 
-        await ctx.send(f" '{title}' is scheduled for {date} at {time}. I will remind you!")
+        #confirmation message
+        await ctx.send(f"'{title}' is scheduled for {meeting_time.strftime('%Y-%m-%d %H:%M')}. I will remind you! {role.mention if role else ''}")
+
     except Exception as e:
         await ctx.send(f"An error occurred: {str(e)}")
-
 
 
 #command to list all schedules and their info in a table
