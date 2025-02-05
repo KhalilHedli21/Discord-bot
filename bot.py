@@ -42,6 +42,7 @@ def delete_schedule(meeting_id):
 
 #command to delete a schedule
 @client.command()
+@commands.has_role('manager') #only managers can delete schedules
 async def delete(ctx, meeting_id: int):
     """deletes a schedule with the given meeting ID.\n syntax: !delete meeting_id"""
     #check if the meeting ID exists
@@ -55,8 +56,15 @@ async def delete(ctx, meeting_id: int):
     delete_schedule(meeting_id)
     await ctx.send(f"Meeting with ID {meeting_id} has been deleted.")
 
+#handle the error when a user tries to delete a schedule without the required role
+@delete.error
+async def delete_error(ctx, error):
+    if isinstance(error, commands.MissingRole):
+        await ctx.send("You do not have the required role ('Manager') to delete a meeting.")
+
 #schedule command to set up meetings
 @client.command()
+@commands.has_role('manager') #only managers can schedule meetings
 async def schedule(ctx, title: str, *args):
     """Schedules a new meeting with a title, absolute date/time, or relative time and a role (optional).\n
     Syntax 1: !schedule "title" "yyyy-mm-dd" "H:M" @role\n
@@ -105,6 +113,12 @@ async def schedule(ctx, title: str, *args):
 
     except Exception as e:
         await ctx.send(f"An error occurred: {str(e)}")
+
+#handle the error when a user tries to schedule a meeting without the required role
+@schedule.error
+async def schedule_error(ctx, error):
+    if isinstance(error, commands.MissingRole):
+        await ctx.send("You do not have the required role ('Manager') to schedule a meeting.")
 
 
 #command to list all schedules and their info in a table
