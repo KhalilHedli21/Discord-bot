@@ -11,28 +11,28 @@ import re
 
 intents = discord.Intents.default()
 intents.message_content = True
-client = commands.Bot(command_prefix='!', intents=intents)
+client = commands.Bot(command_prefix='!', intents=intents,help_command=None)
 
-#setting up the db
-connection = sqlite3.connect('DBNAME') #enter your database name here (to test)
+#database setup
+connection = sqlite3.connect('db.sqlite')
 cursor = connection.cursor()
-#create schedule table to save meetings and their info
 cursor.execute('''CREATE TABLE IF NOT EXISTS schedule (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
     date TEXT NOT NULL,
     time TEXT NOT NULL,
     role TEXT,
+    channel_id INTEGER NOT NULL,
     reminder_sent BOOLEAN DEFAULT FALSE
 )''')
 
 #function to add a schedule to the database
-def add_schedule_to_db(title, date, time, role):
-    cursor.execute('''INSERT INTO schedule (title, date, time, role) VALUES (?, ?, ?, ?)''',
-                   (title, date, time, role))
+def add_schedule_to_db(title, date, time, role,channel_id):
+    cursor.execute('''INSERT INTO schedule (title, date, time, role,channel_id) VALUES (?, ?, ?, ?,?)''',
+                   (title, date, time, role,channel_id))
     connection.commit()
 
-#function to retrieve the role from the server so we can mention directly
+#function to retrieve the role object from the guild by name
 def get_role_by_name(guild, role_name):
     return discord.utils.get(guild.roles, name=role_name)
 #delete a schedule from the database
@@ -44,13 +44,14 @@ def delete_schedule(meeting_id):
 @client.command()
 async def delete(ctx, meeting_id: int):
     """deletes a schedule with the given meeting ID.\n syntax: !delete meeting_id"""
-    
+    #check if the meeting ID exists
     cursor.execute("SELECT * FROM schedule WHERE id = ?", (meeting_id,))
     schedule = cursor.fetchone()
     if not schedule:
         await ctx.send("No meeting found with that ID.")
         return
 
+    #delete the schedule
     delete_schedule(meeting_id)
     await ctx.send(f"Meeting with ID {meeting_id} has been deleted.")
 
@@ -61,13 +62,13 @@ async def schedule(ctx, title: str, *args):
     Syntax 1: !schedule "title" "yyyy-mm-dd" "H:M" @role\n
     Syntax 2: !schedule "title" in X minutes/hours/days/weeks @role"""
     try:
-        #retrieve the role if it is mentioned
+        #extract role if mentioned
         role = None
         if args and args[-1].startswith("<@&"):  #check if last argument is a role mention
-            role = discord.utils.get(ctx.guild.roles, id=int(args[-1][3:-1]))  #get role id
-            time_input = args[:-1]  #delete role from args
+            role = discord.utils.get(ctx.guild.roles, id=int(args[-1][3:-1]))  #extract role ID
+            time_input = args[:-1]  #exclude role from time parsing
         else:
-            time_input = args  #no role
+            time_input = args  #no role provided
 
         time_str = " ".join(time_input)
 
@@ -97,7 +98,7 @@ async def schedule(ctx, title: str, *args):
             return
 
         #save the meeting to the database
-        add_schedule_to_db(title, meeting_time.strftime("%Y-%m-%d"), meeting_time.strftime("%H:%M"), role.name if role else None)
+        add_schedule_to_db(title, meeting_time.strftime("%Y-%m-%d"), meeting_time.strftime("%H:%M"), role.name if role else None,ctx.channel.id)
 
         #confirmation message
         await ctx.send(f"'{title}' is scheduled for {meeting_time.strftime('%Y-%m-%d %H:%M')}. I will remind you! {role.mention if role else ''}")
@@ -110,42 +111,42 @@ async def schedule(ctx, title: str, *args):
 @client.command()
 async def list(ctx):
     """displays your schedule details in a table format!\n syntax: !list """
-    #retrieve schedules from the db
     cursor.execute("SELECT * FROM schedule")
     schedules = cursor.fetchall()
 
-    #check if there are any schedules in the db
+    #check if there are any schedules
     if not schedules:
         await ctx.send("No scheduled meetings found.")
         return
 
+    #create headers
+    headers = ["Meeting_ID", "Title", "Date", "Time", "Role"]
     
-    #draw the header part of tab
+    #draw the top border
     table =  "┌────────┬────────────┬────────────┬───────┬────────────┐\n"
     table += "│   ID   │   Title    │    Date    │ Time  │    Role    │\n"
     table += "├────────┼────────────┼────────────┼───────┼────────────┤\n"
     
-    #add rows
+    #add each schedule row
     for schedule in schedules:
         table += "│ {0:<6} │ {1:<10} │ {2:<8} │ {3:<5} │ {4:<10} │\n".format(schedule[0], schedule[1], schedule[2], schedule[3], schedule[4] or "None")
     
-    #add bottom border
+    #add the bottom border
     table += "└────────┴────────────┴────────────┴───────┴────────────┘"
 
-
-    await ctx.send("Here are your upcoming meetings:")
-    #discord has a 2000 car limit so if it exceeds we split it 
+    #split the table if it exceeds the 2000 character limit
     max_message_length = 2000
     while len(table) > max_message_length:
         await ctx.send(f"```{table[:max_message_length]}```")
         table = table[max_message_length:]
 
-    #send the rest of the table if it exceeds the limit
+    #send the remaining part of the table
+    await ctx.send("Here are your upcoming meetings:")
 
     await ctx.send(f"```{table}```")
 
 
-#command to export the schedules as csv or pdf files
+
 @client.command()
 async def export(ctx, format: str):
     """can turn your schedule into a csv or pdf !\n syntax: !export format_name"""
@@ -158,34 +159,34 @@ async def export(ctx, format: str):
     cursor.execute("SELECT * FROM schedule")
     schedules = cursor.fetchall()
 
-    #if format=csv
+    #if user wants CSV
     if format == "csv":
         #create a file-like object to write CSV data
         csv_file = io.StringIO()
         csv_writer = csv.writer(csv_file)
 
-        #write headers 
+        #write headers (adjust according to the number of columns)
         csv_writer.writerow(["Meeting_ID", "Title", "Date", "Time", "Role"])
 
-        #write the data
+        #write schedule data
         for schedule in schedules:
-            
-            meeting_id, title, date, time, role, _ = schedule[:6]  #no need for the 6th column
+            #unpack the first 5 columns and ignore the sixth one
+            meeting_id, title, date, time, role, _ = schedule[:6]  #ignore the sixth column
             csv_writer.writerow([meeting_id, title, date, time, role or "None"])
 
-        #go back to the start of the file
+        #rewind the StringIO object to the start so we can read it
         csv_file.seek(0)
 
-        #send the file
+        #send the CSV file
         await ctx.send("Here is the CSV of upcoming meetings:", file=discord.File(fp=csv_file, filename="upcoming_meetings.csv"))
     
-    #if format=pdf
+    #if user wants PDF
     elif format == "pdf":
         #create a file-like object to write PDF data
         pdf_file = io.BytesIO()
         c = canvas.Canvas(pdf_file, pagesize=letter)
 
-        #add title and font
+        #add title
         c.setFont("Helvetica", 12)
         c.drawString(100, 750, "Upcoming Meetings:\n")
 
@@ -200,36 +201,35 @@ async def export(ctx, format: str):
 
         #draw table separators (lines)
         c.setLineWidth(1)
-        c.line(90, y_position - 5, 600, y_position - 5)  #add lines for table 
-        y_position -= 20  #advance down
+        c.line(90, y_position - 5, 600, y_position - 5)  #horizontal line after header
+        y_position -= 20  #move down for data rows
 
-        # Draw the table data
+        #draw the table data
         for schedule in schedules:
-            meeting_id, title, date, time, role, _ = schedule[:6]  #no need for 6th column
+            meeting_id, title, date, time, role, _ = schedule[:6]  # Ignore the sixth column
 
-            #draw each cell 
+            #draw each cell content
             c.drawString(x_positions[0], y_position, str(meeting_id))
             c.drawString(x_positions[1], y_position, str(title))
             c.drawString(x_positions[2], y_position, str(date))
             c.drawString(x_positions[3], y_position, str(time))
             c.drawString(x_positions[4], y_position, str(role or "None"))
 
-            #draw line for table
+            #draw a horizontal line after each row
             c.line(90, y_position - 5, 600, y_position - 5)
 
-            y_position -= 20  #advance down
+            y_position -= 20  #move down for the next row
 
         #save PDF
         c.save()
 
-        #rewind to beginning
+        #rewind the BytesIO object to the start
         pdf_file.seek(0)
         #send the PDF file
         await ctx.send("Here is the PDF of the upcoming meetings:", file=discord.File(fp=pdf_file, filename="schedule.pdf"))
 
 
-
-#custom help command
+# Custom help command
 @client.command()
 async def helpme(ctx, command_name: str = None):
     """shows help information for commands. without a command name, lists all available commands.
@@ -252,14 +252,14 @@ async def helpme(ctx, command_name: str = None):
             await ctx.send(f"No command found with the name `{command_name}`.")
 
 
-#task to check and send scheduled reminders each time when bot is turned on
+#task to check and send scheduled reminders each time
 @tasks.loop(seconds=10)  
 async def check_scheduled_reminders():
     cursor.execute("SELECT * FROM schedule WHERE reminder_sent = FALSE")
     schedules = cursor.fetchall()
 
     for schedule in schedules:
-        title, date, time, role, reminder_sent = schedule[1], schedule[2], schedule[3], schedule[4], schedule[5]
+        title, date, time, role, reminder_sent, channel_id = schedule[1], schedule[2], schedule[3], schedule[4], schedule[5], schedule[6]
         date_time_str = f"{date} {time}"
         meeting_time = datetime.strptime(date_time_str, "%Y-%m-%d %H:%M")
 
@@ -270,29 +270,12 @@ async def check_scheduled_reminders():
             #check if the reminder time is in the past but less than 10 minutes ago
             if datetime.now() >= reminder_time_10 and (datetime.now() - reminder_time_10).total_seconds() < 60:
                 guild = client.guilds[0]  # Get the first (and only) guild
-                channel = discord.utils.get(guild.text_channels, name="🖥-cmd")
+                channel = client.get_channel(channel_id)  # Retrieve the channel using channel_id
                 if channel:
-                        if role:
-                     #get the role from the server to easily mention
-                            role_obj = get_role_by_name(guild, role)
-    
-                            if role_obj:
-                                await channel.send(f"Reminder: {title} is starting in 10 minutes! {role_obj.mention}")
-                            else:
-                                await channel.send(f"Reminder: {title} is starting in 10 minutes!")
-                        else:
-                            await channel.send(f"Reminder: {title} is starting in 10 minutes!")
-                #update the database to mark this reminder as sent so that it won't check for it again
-                cursor.execute("UPDATE schedule SET reminder_sent = TRUE WHERE id = ?", (schedule[0],))
-                connection.commit()
-
-            #check if the meeting time is now
-            if datetime.now() >= meeting_time and (datetime.now() - meeting_time).total_seconds() < 60:
-                if channel:
+                    #handle role if it's specified
                     if role:
-                    #get the role from the server to easily mention
-                        role_obj = get_role_by_name(guild, role)
-    
+                        #get the role from the server to easily mention
+                        role_obj = discord.utils.get(guild.roles, name=role)
                         if role_obj:
                             await channel.send(f"Reminder: {title} is starting in 10 minutes! {role_obj.mention}")
                         else:
@@ -300,10 +283,45 @@ async def check_scheduled_reminders():
                     else:
                         await channel.send(f"Reminder: {title} is starting in 10 minutes!")
 
+                #update the database to mark this reminder as sent so that it won't check for it again
+                cursor.execute("UPDATE schedule SET reminder_sent = TRUE WHERE id = ?", (schedule[0],))
+                connection.commit()
+
+            #check if the meeting time is now
+            if datetime.now() >= meeting_time and (datetime.now() - meeting_time).total_seconds() < 60:
+                if channel:
+                    #handle role if it's specified
+                    if role:
+                        #get the role from the server to easily mention
+                        role_obj = discord.utils.get(guild.roles, name=role)
+                        if role_obj:
+                            await channel.send(f"Reminder: {title} is starting now! {role_obj.mention}")
+                        else:
+                            await channel.send(f"Reminder: {title} is starting now!")
+                    else:
+                        await channel.send(f"Reminder: {title} is starting now!")
+
                 #mark the reminder as sent for "starting now"
                 cursor.execute("UPDATE schedule SET reminder_sent = TRUE WHERE id = ?", (schedule[0],))
                 connection.commit()
 
+
+
+#when '!shellmates bot' is typed, the bot will respond with a greeting message
+@client.event
+async def on_message(message):
+    if message.author == client.user:
+        return  
+
+     #check for the exact bot command
+    if message.content.lower() == "!shellmates bot":
+        await message.channel.send("Hey! I'm the bot for making schedules. Type your command or type '!helpme' to see the available commands.")
+    elif message.content.lower().startswith("!shellmates") and message.content.lower() != "!shellmates bot":
+        #catch any errors specifically related to incorrect '!shellmates' commands
+        await message.channel.send("You made an error while typing the command. Try again! Type '!shellmates bot' to get the bot's attention.")
+    else:
+       
+        await client.process_commands(message) 
 
 #start the loop when the bot is ready
 @client.event
